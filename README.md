@@ -1,5 +1,5 @@
-- 👋 Hi, I’m @halilmertogut, I'm studying CTIS(Computer Technology and Information Systems) at Bilkent University.
-- 👀 I’m interested in Data Science and OOP
+- 👋 Hi, I’m @halilmertogut, I'm graduated from CTIS(Computer Technology and Information Systems) at Bilkent University.
+- 👀 I’m interested in Data Science and Web Technologies
 - 📫 You can reach me via my E-mail
 
 <!---
