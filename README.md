@@ -35,8 +35,7 @@
 ### GitHub Stats
 
 <p>
-  <img src="https://github-readme-stats.vercel.app/api?username=halilmertogut&show_icons=true&theme=github_dark&hide_border=true&count_private=true" alt="GitHub Stats" height="170" />
-  <img src="https://github-readme-stats.vercel.app/api/top-langs/?username=halilmertogut&layout=compact&theme=github_dark&hide_border=true" alt="Top Languages" height="170" />
+  <img src="https://github-readme-streak-stats.herokuapp.com?user=halilmertogut&theme=github-dark-blue&hide_border=true" alt="GitHub Streak" />
 </p>
 
 ---
