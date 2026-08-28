@@ -1,0 +1,48 @@
+# Post-credits snake + the live "NOW IN PRODUCTION" card.
+# Everything is generated into dist/ and force-published to the `output`
+# branch, so main never accumulates bot commits.
+name: Credits
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: credits
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Contribution snake
+        uses: Platane/snk@v3
+        with:
+          github_user_name: halilmertogut
+          outputs: |
+            dist/github-snake.svg
+            dist/github-snake-dark.svg?palette=github-dark
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Live stats card
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/fetch_stats.py > dist/stats.json
+          cat dist/stats.json
+          uv run --with fonttools --with brotli scripts/build_assets.py --stats dist/stats.json --out dist
+
+      - name: Publish to output branch
+        uses: crazy-max/ghaction-github-pages@v4
+        with:
+          target_branch: output
+          build_dir: dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""Build the animated SVG assets referenced by README.md.
+"""Build the SVG assets referenced by README.md.
 
-Run (no local install needed):
+Static assets (run locally, commit the output):
 
     uv run --with fonttools --with brotli scripts/build_assets.py
 
-Steps:
-  1. download Jost (SIL OFL 1.1) once into scripts/.cache/
-  2. instance the variable font at the weights we use
-  3. subset it to Basic Latin + Turkish glyphs and encode as WOFF2
-  4. embed the fonts as base64 and render assets/*.svg
+Live stats card (run by .github/workflows/credits.yml and published to the
+`output` branch, never committed to main):
+
+    uv run --with fonttools --with brotli scripts/build_assets.py --stats stats.json --out dist
+
+Steps: download Jost (SIL OFL 1.1) once into scripts/.cache/, instance the
+variable font at the weights we use, subset it to Basic Latin + Turkish glyphs
+and embed it as base64 WOFF2 so the SVGs render identically everywhere.
 
 GitHub serves README images through camo as a plain <img>, so the SVGs must be
-self-contained: no external fonts, no scripts, CSS animations only.
+self-contained: no external fonts, no scripts, CSS animations only. Media
+queries inside an SVG evaluate against the rendered <img> width, which is how
+the phone layouts switch on without a second file.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import io
+import json
+import re
 import urllib.request
 from pathlib import Path
 from string import Template
@@ -29,7 +37,7 @@ from fontTools.ttLib import TTFont
 from fontTools.varLib import instancer
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ASSETS = SCRIPT_DIR.parent / "assets"
+ROOT = SCRIPT_DIR.parent
 CACHE = SCRIPT_DIR / ".cache"
 FONT_URL = "https://github.com/google/fonts/raw/main/ofl/jost/Jost%5Bwght%5D.ttf"
 FONT_STACK = '"Jost","Futura","Avenir Next","Helvetica Neue",Arial,sans-serif'
@@ -48,14 +56,21 @@ CREDITS: List[Tuple[str, str]] = [
     ("SYSTEMS", "Rust · Docker · Celery"),
     ("DATA", "PostgreSQL · MySQL · PostHog"),
 ]
+STATS_HEADER = "NOW IN PRODUCTION"
 
 # Basic Latin + Turkish letters + the typographic marks we use.
 GLYPHS = set(range(0x20, 0x7F)) | {ord(c) for c in "·ÇÖÜçöüĞğİıŞş–—•"}
 
-# Browsers pause <img> SVG animations while off-screen, so the credits start
+# Browsers pause <img> SVG animations while off-screen, so the cards start
 # almost immediately once scrolled into view instead of syncing with the banner.
-CREDITS_DELAY = 0.15
-CREDITS_STAGGER = 0.12
+ROW_DELAY = 0.15
+ROW_STAGGER = 0.12
+
+# Rendered <img> width (CSS px) below which the phone layout switches on.
+TITLE_NARROW = 560
+CARD_NARROW = 480
+CARD_W = 640
+CARD_MARGIN = 24
 
 THEMES: Dict[str, Dict[str, str]] = {
     "dark": {"name": "#e6edf3", "label": "#7d8590"},
@@ -104,6 +119,11 @@ class Metrics:
         # Browsers add letter-spacing after every glyph, including the last one.
         return advance + tracking_em * size * len(text)
 
+    def fits(self, text: str, size: float, tracking_em: float, max_width: float, what: str) -> None:
+        width = self.width(text, size, tracking_em)
+        if width > max_width:
+            raise SystemExit(f"{what} too wide: {width:.0f} > {max_width:.0f} ({text!r})")
+
 
 def num(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
@@ -112,6 +132,22 @@ def num(value: float) -> str:
 def centered_x(cx: float, size: float, tracking_em: float) -> str:
     """text-anchor=middle centers the trailing tracking too; shift back by half of it."""
     return num(cx + tracking_em * size / 2)
+
+
+def row(delay: float, inner: str, extra_class: str = "") -> str:
+    cls = f"row {extra_class}".strip()
+    return f'<g class="{cls}" style="animation-delay:{delay:.2f}s">{inner}</g>'
+
+
+FONT_FACE_400 = '@font-face{font-family:"Jost";font-weight:400;src:url(data:font/woff2;base64,$f400) format("woff2")}'
+CARD_STYLE = (
+    'text{font-family:$fonts;text-rendering:geometricPrecision}'
+    '.row{animation:rise 1.1s cubic-bezier(.16,1,.3,1) both}'
+    '@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}'
+    '.m{display:none}'
+    '@media (max-width:${narrow}px){.d{display:none}.m{display:inline}}'
+    '@media (prefers-reduced-motion:reduce){.row{animation:none}}'
+)
 
 
 # --- Title card --------------------------------------------------------------
@@ -134,6 +170,7 @@ text{font-family:$fonts;text-rendering:geometricPrecision}
 .rule{stroke:#3a3a3a;stroke-width:1;transform-origin:${cx}px ${rule_y}px;animation:rule 1.5s cubic-bezier(.16,1,.3,1) ${t_rule}s both}
 .subtitle{font-size:${sub_size}px;letter-spacing:${sub_ls}em;fill:#9b9b9b;animation:subtitle 1.7s cubic-bezier(.16,1,.3,1) ${t_sub}s both}
 .footer{font-size:${foot_size}px;letter-spacing:${foot_ls}em;fill:#5a5a5a;animation:fade 1.4s ease-out ${t_foot}s both}
+@media (max-width:${narrow}px){.title{font-size:${title_size_m}px}.subtitle{font-size:${sub_size_m}px}.footer{font-size:${foot_size_m}px}}
 @keyframes hold{from{opacity:1}to{opacity:1}}
 @keyframes sweep{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
 @keyframes flicker{0%{opacity:.45}14%{opacity:1}28%{opacity:.6}42%{opacity:1}58%{opacity:.8}72%{opacity:1}100%{opacity:1}}
@@ -179,6 +216,7 @@ def render_title(f400: str, f500: str, m400: Metrics, m500: Metrics) -> str:
     title_size, title_ls, title_ls_from = 46, 0.28, 0.6
     sub_size, sub_ls, sub_ls_from = 13.5, 0.55, 0.95
     foot_size, foot_ls = 10.5, 0.3
+    title_size_m, sub_size_m, foot_size_m = 60, 22, 17  # phone: same frame, bigger type
     rule_y, margin = 212, 36
 
     # Film leader: one sweep per number, hard cut to black, then the title.
@@ -193,10 +231,13 @@ def render_title(f400: str, f500: str, m400: Metrics, m500: Metrics) -> str:
         for i, n in enumerate(COUNTDOWN)
     )
 
-    title_w = m500.width(TITLE, title_size, title_ls)
-    if title_w > w * 0.76:
-        raise SystemExit(f"title too wide for the frame: {title_w:.0f}/{w}")
-    print(f"title width {title_w:.0f}/{w}, leader {leader_dur:.1f}s, title at {cut + 0.05:.2f}s")
+    m500.fits(TITLE, title_size, title_ls, w * 0.76, "title")
+    m500.fits(TITLE, title_size_m, title_ls, w - 2 * margin, "title (phone)")
+    m400.fits(SUBTITLE, sub_size_m, sub_ls, w - 2 * margin, "subtitle (phone)")
+    footer_w = sum(m400.width(t, foot_size_m, foot_ls) for t in (FOOTER_LEFT, FOOTER_CENTER, FOOTER_RIGHT))
+    if footer_w > w - 2 * margin - 2 * 40:
+        raise SystemExit(f"footer (phone) too wide: {footer_w:.0f}")
+    print(f"title width {m500.width(TITLE, title_size, title_ls):.0f}/{w}, leader {leader_dur:.1f}s, title at {cut + 0.05:.2f}s")
 
     return TITLE_SVG.substitute(
         w=w, h=h, w1=w - 1, h1=h - 1, cx=num(cx), cy=num(cy), fonts=FONT_STACK, f400=f400, f500=f500,
@@ -213,25 +254,34 @@ def render_title(f400: str, f500: str, m400: Metrics, m500: Metrics) -> str:
         sub_x=centered_x(cx, sub_size, sub_ls), sub_y=242,
         foot_size=foot_size, foot_ls=foot_ls, foot_y=h - 30,
         foot_lx=margin, foot_cx=centered_x(cx, foot_size, foot_ls), foot_rx=num(w - margin + foot_ls * foot_size),
+        narrow=TITLE_NARROW, title_size_m=title_size_m, sub_size_m=sub_size_m, foot_size_m=foot_size_m,
     )
 
 
-# --- Credits -----------------------------------------------------------------
+# --- Credits card ------------------------------------------------------------
 CREDITS_SVG = Template(
     """<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 $w $h" width="$w" height="$h" role="img" aria-labelledby="credits-desc">
 <title id="credits-desc">$aria</title>
 <style>
-@font-face{font-family:"Jost";font-weight:400;src:url(data:font/woff2;base64,$f400) format("woff2")}
-text{font-family:$fonts;text-rendering:geometricPrecision}
+"""
+    + FONT_FACE_400
+    + "\n"
+    + CARD_STYLE
+    + """
 .head{font-size:${head_size}px;letter-spacing:${head_ls}em;fill:$label}
 .role{font-size:${role_size}px;letter-spacing:${role_ls}em;fill:$label}
 .name{font-size:${name_size}px;letter-spacing:${name_ls}em;fill:$name}
-.row{animation:rise 1.1s cubic-bezier(.16,1,.3,1) both}
-@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){.row{animation:none}}
+.m .head{font-size:${head_size_m}px}
+.m .role{font-size:${role_size_m}px}
+.m .name{font-size:${name_size_m}px}
 </style>
-$rows
+<g class="d">
+$desktop
+</g>
+<g class="m">
+$mobile
+</g>
 </svg>
 """
 )
@@ -243,61 +293,173 @@ def credits_alt() -> str:
 
 
 def render_credits(f400: str, m: Metrics, theme: str) -> str:
-    w = 640
+    w, margin = CARD_W, CARD_MARGIN
     head_size, head_ls = 11, 0.5
     role_size, role_ls = 10.5, 0.3
     name_size, name_ls = 15, 0.01
-    head_y, row0, step, bottom, gap, margin = 30, 78, 38, 30, 26, 24
+    head_size_m, role_size_m, name_size_m = 14, 13, 21
     colors = THEMES[theme]
 
+    # Desktop: end-credits layout, role right-aligned | gutter | name left-aligned.
+    head_y, row0, step, gap = 30, 78, 38, 26
     max_role = max(m.width(role, role_size, role_ls) for role, _ in CREDITS)
     max_name = max(m.width(name, name_size, name_ls) for _, name in CREDITS)
-    # Put the gutter where the whole block ends up optically centered.
-    gutter = w / 2 - (max_name - max_role) / 2
+    gutter = w / 2 - (max_name - max_role) / 2  # block optically centered
     left, right = gutter - gap / 2 - max_role, gutter + gap / 2 + max_name
     if left < margin or right > w - margin:
         raise SystemExit(f"credits overflow: {left:.0f}..{right:.0f} in {w}")
-    print(f"credits[{theme}] block {left:.0f}..{right:.0f}/{w}")
-
-    h = row0 + step * (len(CREDITS) - 1) + bottom
-    rows = [
-        f'<g class="row" style="animation-delay:{CREDITS_DELAY:.2f}s">'
-        f'<text class="head" x="{centered_x(w / 2, head_size, head_ls)}" y="{head_y}" text-anchor="middle">'
-        f"{escape(CREDITS_HEADER)}</text></g>"
+    desktop = [
+        row(ROW_DELAY, f'<text class="head" x="{centered_x(w / 2, head_size, head_ls)}" y="{head_y}" text-anchor="middle">{escape(CREDITS_HEADER)}</text>')
     ]
     for i, (role, name) in enumerate(CREDITS):
         y = row0 + i * step
-        delay = CREDITS_DELAY + 0.2 + i * CREDITS_STAGGER
-        rows.append(
-            f'<g class="row" style="animation-delay:{delay:.2f}s">'
-            f'<text class="role" x="{num(gutter - gap / 2 + role_ls * role_size)}" y="{y}" text-anchor="end">{escape(role)}</text>'
-            f'<text class="name" x="{num(gutter + gap / 2)}" y="{y}">{escape(name)}</text></g>'
+        desktop.append(
+            row(
+                ROW_DELAY + 0.2 + i * ROW_STAGGER,
+                f'<text class="role" x="{num(gutter - gap / 2 + role_ls * role_size)}" y="{y}" text-anchor="end">{escape(role)}</text>'
+                f'<text class="name" x="{num(gutter + gap / 2)}" y="{y}">{escape(name)}</text>',
+            )
         )
+    h_desktop = row0 + step * (len(CREDITS) - 1) + 30
+
+    # Phone: stacked and centered, larger type (the <img> renders at ~0.55x there).
+    head_y_m, row0_m, step_m, name_dy = 26, 58, 46, 22
+    for _, name in CREDITS:
+        m.fits(name, name_size_m, name_ls, w - 2 * margin, "credits name (phone)")
+    mobile = [
+        row(ROW_DELAY, f'<text class="head" x="{centered_x(w / 2, head_size_m, head_ls)}" y="{head_y_m}" text-anchor="middle">{escape(CREDITS_HEADER)}</text>')
+    ]
+    for i, (role, name) in enumerate(CREDITS):
+        y = row0_m + i * step_m
+        mobile.append(
+            row(
+                ROW_DELAY + 0.2 + i * ROW_STAGGER,
+                f'<text class="role" x="{centered_x(w / 2, role_size_m, role_ls)}" y="{y}" text-anchor="middle">{escape(role)}</text>'
+                f'<text class="name" x="{centered_x(w / 2, name_size_m, name_ls)}" y="{y + name_dy}" text-anchor="middle">{escape(name)}</text>',
+            )
+        )
+    h_mobile = row0_m + step_m * (len(CREDITS) - 1) + name_dy + 22
+    h = max(h_desktop, h_mobile)
+    print(f"credits[{theme}] block {left:.0f}..{right:.0f}/{w}, h={h}")
 
     return CREDITS_SVG.substitute(
-        w=w, h=h, fonts=FONT_STACK, f400=f400, aria=escape(credits_alt()),
-        head_size=head_size, head_ls=head_ls, role_size=role_size, role_ls=role_ls,
-        name_size=name_size, name_ls=name_ls, label=colors["label"], name=colors["name"],
-        rows="\n".join(rows),
+        w=w, h=h, fonts=FONT_STACK, f400=f400, aria=escape(credits_alt()), narrow=CARD_NARROW,
+        head_size=head_size, head_ls=head_ls, role_size=role_size, role_ls=role_ls, name_size=name_size, name_ls=name_ls,
+        head_size_m=head_size_m, role_size_m=role_size_m, name_size_m=name_size_m,
+        label=colors["label"], name=colors["name"],
+        desktop="\n".join(desktop), mobile="\n".join(mobile),
+    )
+
+
+# --- Live stats card ---------------------------------------------------------
+STATS_SVG = Template(
+    """<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 $w $h" width="$w" height="$h" role="img" aria-labelledby="stats-desc">
+<title id="stats-desc">$aria</title>
+<style>
+"""
+    + FONT_FACE_400
+    + "\n"
+    + CARD_STYLE
+    + """
+.head{font-size:${head_size}px;letter-spacing:${head_ls}em;fill:$label}
+.line{font-size:${line_size}px;letter-spacing:${line_ls}em;fill:$label}
+.num{fill:$name}
+.m .head{font-size:${head_size_m}px}
+.m .line{font-size:${line_size_m}px}
+</style>
+<g class="d">
+$desktop
+</g>
+<g class="m">
+$mobile
+</g>
+</svg>
+"""
+)
+
+
+def stats_lines(stats: dict) -> Tuple[str, str, str]:
+    """(desktop one-liner, phone line 1, phone line 2)."""
+    count = f"{int(stats['last_30_days']):,}"
+    streak = int(stats.get("streak_days") or 0)
+    seen = stats.get("last_seen_days_ago")
+    if streak >= 7:  # a short streak next to a big monthly count reads weak
+        tail = f"{streak}-DAY STREAK"
+    elif seen == 0:
+        tail = "LAST SEEN TODAY"
+    elif seen == 1:
+        tail = "LAST SEEN YESTERDAY"
+    elif seen is None:
+        tail = "ON HIATUS"
+    else:
+        tail = f"LAST SEEN {seen} DAYS AGO"
+    return f"{count} CONTRIBUTIONS IN THE LAST 30 DAYS · {tail}", f"{count} CONTRIBUTIONS · LAST 30 DAYS", tail
+
+
+def highlight(text: str) -> str:
+    """Escape for XML and wrap numbers in a brighter tspan."""
+    return re.sub(r"\d[\d,]*", lambda m: f'<tspan class="num">{m.group(0)}</tspan>', escape(text))
+
+
+def render_stats(f400: str, m: Metrics, theme: str, stats: dict) -> str:
+    w, h, margin = CARD_W, 92, CARD_MARGIN
+    head_size, head_ls = 11, 0.5
+    line_size, line_ls = 11, 0.3
+    head_size_m, line_size_m = 14, 15
+    colors = THEMES[theme]
+    desktop_line, phone_1, phone_2 = stats_lines(stats)
+    m.fits(desktop_line, line_size, line_ls, w - 2 * margin, "stats line")
+    m.fits(phone_1, line_size_m, line_ls, w - 2 * margin, "stats line (phone)")
+
+    cx = w / 2
+    desktop = [
+        row(ROW_DELAY, f'<text class="head" x="{centered_x(cx, head_size, head_ls)}" y="26" text-anchor="middle">{escape(STATS_HEADER)}</text>'),
+        row(ROW_DELAY + 0.2, f'<text class="line" x="{centered_x(cx, line_size, line_ls)}" y="56" text-anchor="middle">{highlight(desktop_line)}</text>'),
+    ]
+    mobile = [
+        row(ROW_DELAY, f'<text class="head" x="{centered_x(cx, head_size_m, head_ls)}" y="24" text-anchor="middle">{escape(STATS_HEADER)}</text>'),
+        row(ROW_DELAY + 0.2, f'<text class="line" x="{centered_x(cx, line_size_m, line_ls)}" y="54" text-anchor="middle">{highlight(phone_1)}</text>'),
+        row(ROW_DELAY + 0.32, f'<text class="line" x="{centered_x(cx, line_size_m, line_ls)}" y="78" text-anchor="middle">{highlight(phone_2)}</text>'),
+    ]
+    aria = f"{STATS_HEADER.title()} — {desktop_line.lower()} (as of {stats.get('generated_at', 'unknown')})"
+    print(f"stats[{theme}]: {desktop_line}")
+    return STATS_SVG.substitute(
+        w=w, h=h, fonts=FONT_STACK, f400=f400, aria=escape(aria), narrow=CARD_NARROW,
+        head_size=head_size, head_ls=head_ls, line_size=line_size, line_ls=line_ls,
+        head_size_m=head_size_m, line_size_m=line_size_m,
+        label=colors["label"], name=colors["name"],
+        desktop="\n".join(desktop), mobile="\n".join(mobile),
     )
 
 
 # --- Main --------------------------------------------------------------------
 def write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
-    print(f"wrote {path.relative_to(SCRIPT_DIR.parent)} ({len(content.encode()) / 1024:.1f} KB)")
+    print(f"wrote {path} ({len(content.encode()) / 1024:.1f} KB)")
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--stats", type=Path, help="stats JSON from fetch_stats.py; renders only the live stats card")
+    parser.add_argument("--out", type=Path, default=ROOT / "assets", help="output directory (default: assets/)")
+    args = parser.parse_args()
+
     vf = variable_font()
     regular, f400 = build_face(vf, 400)
-    medium, f500 = build_face(vf, 500)
-    m400, m500 = Metrics(regular), Metrics(medium)
+    m400 = Metrics(regular)
+    args.out.mkdir(parents=True, exist_ok=True)
 
-    ASSETS.mkdir(exist_ok=True)
-    write(ASSETS / "title.svg", render_title(f400, f500, m400, m500))
+    if args.stats:
+        stats = json.loads(args.stats.read_text(encoding="utf-8"))
+        for theme in THEMES:
+            write(args.out / f"stats-{theme}.svg", render_stats(f400, m400, theme, stats))
+        return
+
+    medium, f500 = build_face(vf, 500)
+    write(args.out / "title.svg", render_title(f400, f500, m400, Metrics(medium)))
     for theme in THEMES:
-        write(ASSETS / f"credits-{theme}.svg", render_credits(f400, m400, theme))
+        write(args.out / f"credits-{theme}.svg", render_credits(f400, m400, theme))
     print(f"\ncredits alt text:\n{credits_alt()}")
 
 
