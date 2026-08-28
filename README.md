@@ -10,6 +10,13 @@
 </p>
 
 <p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/halilmertogut/halilmertogut/output/stats-dark.svg" />
+    <img src="https://raw.githubusercontent.com/halilmertogut/halilmertogut/output/stats-light.svg" width="640" alt="Now in production — contributions in the last 30 days and current streak, refreshed every 6 hours" />
+  </picture>
+</p>
+
+<p align="center">
   <sub>CONTACT</sub><br />
   <a href="https://www.linkedin.com/in/halilmertogut/">linkedin.com/in/halilmertogut</a>
 </p>
