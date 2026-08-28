@@ -25,6 +25,18 @@
 
 <div align="center">
 <details>
+  <summary><sub>DIRECTOR'S COMMENTARY</sub></summary>
+  <br />
+  <p align="center">
+    Most of the footage never reaches a public repo — it ships to production instead.<br />
+    Obsessive about the frame: typography, motion, empty states, the details you only notice when they're wrong.<br />
+    Current set: Next.js, Django and Rust, with a growing second unit of coding agents.
+  </p>
+</details>
+</div>
+
+<div align="center">
+<details>
   <summary><sub>POST-CREDITS SCENE</sub></summary>
   <br />
   <picture>
